@@ -1,0 +1,19 @@
+# secrets
+.env
+
+# environments / caches
+.venv/
+venv-jam/
+__pycache__/
+downloaded_json_files/
+
+# logs
+*.log
+
+# large or rebuildable data (regenerate with the scripts)
+data/sentinel/*.tif
+data/ossdd_yolo/
+data/ossdd/
+data/jamming/days/
+# live AIS recording, still being appended to
+data/ais/

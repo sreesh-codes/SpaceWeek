@@ -1,0 +1,11 @@
+# main venv (Python 3.10+)
+earthengine-api
+requests
+huggingface_hub
+rasterio
+numpy
+webdataset
+websockets
+
+# 05_jamming.py goes in a SEPARATE Python 3.8-3.11 venv:
+#   pip install rfi-fileparser
