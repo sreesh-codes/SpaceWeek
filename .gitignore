@@ -17,3 +17,8 @@ data/ossdd/
 data/jamming/days/
 # live AIS recording, still being appended to
 data/ais/
+
+# temporary runs & baseline weights
+runs/
+yolo11n.pt
+
