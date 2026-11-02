@@ -3,8 +3,8 @@
 <div align="center">
 
 ![Theme](https://img.shields.io/badge/SpaceWeek-Theme%203%3A%20Seas%20of%20Data-blue?style=for-the-badge)
-![Model](https://img.shields.io/badge/SAR%20Detector-YOLO11n%20(80.7%25%20mAP50)-success?style=for-the-badge)
-![Fusion](https://img.shields.io/badge/Fusion%20Scorer-GBDT%20(R%C2%B2%3D0.99)-orange?style=for-the-badge)
+![Model](https://img.shields.io/badge/SAR%20Detector-YOLO11n--OBB%20(test%20F1%200.90)-success?style=for-the-badge)
+![Fusion](https://img.shields.io/badge/Fusion%20Scorer-Monotonic%20GBDT-orange?style=for-the-badge)
 ![Interface](https://img.shields.io/badge/Dashboard-Streamlit-red?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-CC--BY--NC--SA--4.0-lightgrey?style=for-the-badge)
 
@@ -12,7 +12,7 @@
 
 **An autonomous AI and satellite radar pipeline that cross-references maritime trade paperwork against ESA Copernicus Sentinel radar and optical imagery to eradicate trade-finance fraud and false alarms in the Gulf.**
 
-[Problem & Context](#1-problem-statement--why-now) • [Architecture](#2-architectural-decisions--system-pipeline) • [Trained Models](#3-the-ai--satellite-models) • [Statistical Parameters](#4-statistical-parameters--validation-metrics) • [System Capabilities](#5-system-capabilities--solved-fraud-vectors) • [Business Model](#6-business-model--commercial-viability) • [Quickstart](#7-quickstart--dashboard)
+[Problem & Context](#1-problem-statement--why-now) • [Architecture](#2-architectural-decisions--system-pipeline) • [Trained Models](#3-the-ai--satellite-models) • [Backtest Results](#4-backtest-results) • [System Capabilities](#5-system-capabilities--solved-fraud-vectors) • [Business Model](#6-business-model--commercial-viability) • [Quickstart](#7-quickstart--dashboard)
 
 ---
 
@@ -39,10 +39,11 @@
 * **Unified Evidence Engine:** Generates a **0–100 Orbital Evidence Score** and an audit-ready compliance memorandum.
 
 ### The Jamming Toggle: Eliminating False Alarms
-* **Scenario:** A genuine \$45M crude shipment in the Gulf of Oman where the vessel's AIS went dark due to electronic interference.
-* **Without Jamming Layer (Legacy AIS Screening):** System flags an unverified dark vessel. **Score drops to 31/100 (HIGH RISK / FALSE ALARM)**.
-* **With Bill of Orbit:** The Jamming-Trust layer recognizes 82% GPS jamming, discounts AIS, and validates the 322m VLCC hull on Sentinel-1 radar. **Score: 96.2/100 (APPROVED)**.
-* **Impact:** Prevents disastrous false transaction halts for GCC trade banks.
+* **Scenario:** A genuine VLCC (330 m declared) whose AIS is off, with a 322 m hull confirmed on Sentinel-1 radar, in the most jammed cell in our data (24.30N 52.45E on 2026-09-01: jam score 0.94 from 85 aircraft).
+* **Without Jamming Layer (Legacy AIS Screening):** Missing AIS counts against the ship. **Score 57.2/100 (MEDIUM RISK, manual review)**.
+* **With Bill of Orbit:** The layer reads the real jam score, cuts AIS trust to 0.05 and lets the radar evidence decide. **Score 92.0/100 (LOW RISK)**.
+* **Where it matters:** jamming is patchy. Only 5% of cell-days in Sep-Oct 2026 reached a jam score of 0.25, and the anchorages (Fujairah, Khor Fakkan, Sohar) had median scores of 0.04-0.08. In clean water the layer correctly changes almost nothing.
+* **Impact:** Prevents false transaction halts for GCC trade banks when, and only when, the GNSS environment explains the missing AIS.
 
 ### Business Moat & Go-to-Market
 * **Target Customers:** Trade-finance and sanctions-compliance desks at UAE and GCC banks (Emirates NBD, FAB, DIB, ADCB), trade credit insurers, and trade-automation platforms.
@@ -73,15 +74,16 @@ flowchart TD
     BL["Trade Document<br/>(Bill of Lading / Letter of Credit)"] --> N1["1. Document Claim Extractor<br/>(Vessel Name, IMO, Port AOI, Date, Tonnage)"]
     
     subgraph Space_Telemetry["Multimodal Orbital & Telemetry Engine"]
-        N1 --> ACQ["Sentinel-1 Pass Alignment<br/>(Matches orbit file within ±3 days)"]
-        ACQ --> M1["2. SAR Ship Detector (YOLO11n)<br/>• Penetrates clouds/night<br/>• Predicts bbox & confidence<br/>• Measures hull length (m)"]
+        N1 --> ACQ["Sentinel-1 Pass Alignment<br/>(Closest pass, flagged if outside ±3 days)"]
+        ACQ --> M1["2. SAR Ship Detector (YOLO11n-OBB)<br/>• Penetrates clouds/night<br/>• Rotated boxes over the full scene<br/>• Hull length & heading (m, deg)"]
         
-        N1 --> M2["3. Jamming-Trust Map (ML)<br/>• HistGBDT Spatio-Temporal Model<br/>• Isolation Forest Anomaly Detection<br/>• Computes AIS Trust Multiplier"]
+        N1 --> M2["3. Jamming-Trust Map (ML)<br/>• Observed cell score, else GBDT gap-fill / forecast<br/>• Anomaly vs the cell's own history<br/>• Computes AIS Trust Multiplier"]
         
-        N1 --> M3["4. STS & Dark Vessel Screening<br/>• Global Fishing Watch 4Wings Archive<br/>• Proximity Clustering (<250m)<br/>• Unflagged Radar Detections"]
+        N1 --> M3["4. STS & Dark Vessel Screening<br/>• Global Fishing Watch 4Wings Archive<br/>• Crowded radar cells + side-by-side SAR hulls<br/>• Dark (non-AIS) detections"]
+        M1 --> M3
     end
     
-    M1 --> FUSE["5. Gradient-Boosted Fusion Scorer<br/>(12-Feature GBDT · R² = 0.9927)"]
+    M1 --> FUSE["5. Gradient-Boosted Fusion Scorer<br/>(12-Feature monotonic GBDT)"]
     M2 --> FUSE
     M3 --> FUSE
     
@@ -104,51 +106,100 @@ flowchart TD
 * **Extraction:** Vessel Name, IMO Number, Port Coordinates/AOI, Loading Date, Cargo Commodity, and Declared Tonnage.
 * **Inference:** Automatically derives the expected vessel deadweight class and physical length in meters (e.g., $135,000\text{ MT} \rightarrow \text{Suezmax} \approx 274\text{m}$, tolerance $\pm 54.8\text{m}$).
 
-### Model 2: SAR Ship Detector (`train_sar_detector.py`)
-* **Architecture:** **YOLO11n** fine-tuned on Sentinel-1 radar amplitude chips from the OpenSARShip Detection Dataset (OSSDD).
-* **Input:** Dual-polarization radar chips ($R = \text{VV}$, $G = \text{VH}$, $B = \text{mean}$).
-* **Output:** Vessel bounding boxes, class probability, and estimated physical length derived from bounding box aspect ratio at 10m Ground Range Detected (GRD) pixel spacing.
-* **Performance:** **$80.68\%$ $\text{mAP@50}$**, **$89.9\%$ Recall**, **$46.1\text{ ms}$ inference latency**.
+### Model 2: SAR Ship Detector (`train_sar_detector.py`, `sar_inference.py`)
+* **Architecture:** **YOLO11n-OBB** (rotated boxes) fine-tuned on 2,000 Sentinel-1 chips from the OpenSARShip Detection Dataset (OSSDD), with 400 val and 1,000 held-out test chips from other scenes.
+* **Input:** Dual-polarization radar chips ($R = \text{VV}$, $G = \text{VH}$, $B = \text{mean}$), robust z-scored (see above).
+* **Output:** Per ship: position (lat/lon), hull length and width from the rotated box's sides at 10 m/px, heading, and confidence. Full Earth Engine scenes are tiled (704 px, 100 px overlap) and duplicates merged.
+* **Why rotated boxes:** an upright box overstates the length of any ship not lying north-south or east-west; the earlier detect model overestimated lengths by 8.8 m on average.
+* **Training for generalisation:** SAR-safe augmentation only (flips, full rotation, mild scale/brightness, no colour jitter), early stopping (patience 10, best epoch 23 of 33), fixed seed. Thresholds are chosen on val or earlier dates and reported on held-out data.
 
-### Model 3: Jamming-Trust Map & Anomaly Detector (`jamming_model.py`)
-* **Architecture:** `HistGradientBoostingRegressor` + `IsolationForest` spatial anomaly detector.
-* **Dataset:** 300,853 real GNSS degradation records spanning the Persian Gulf, Strait of Hormuz, and Gulf of Oman.
-* **Features:** Latitude, longitude, day of year, day of week, cyclical seasonal encodings, and geodesic proximity to strategic choke points (Hormuz, Fujairah Anchorage, Khor Fakkan, Sohar).
-* **Output:** Local Jamming Intensity ($0.0$ to $1.0$), Anomaly Flag, and the **AIS Trust Factor**:
+### Model 3: Jamming-Trust Map & Anomaly Flag (`jamming_model.py`)
+* **Dataset:** 300,853 real GNSS-interference records (Stanford ADS-B integrity monitor, H3 res-4 cells, 2026-09-01 to 2026-10-30).
+* **How a query is answered:**
+  1. If the cell containing the point was observed that day, use the observed score, shrunk toward the model when fewer than 10 aircraft reported.
+  2. Otherwise a `HistGradientBoostingRegressor` fills the gap from the cell's **past** (mean, last value, 7-day mean, days since last) and same-day neighbouring cells within 80 km. A second, forecast model (no same-day features, trained with a random 1-14 day horizon) handles dates nobody observed.
+  3. Anomaly flag: today's score is more than 3 robust z-units above the cell's own history.
+* **Training:** samples weighted by aircraft count (a score from 2 aircraft is mostly noise); depth-4 trees, min leaf 40, early stopping.
+* **Output:** Jam score ($0.0$ to $1.0$), anomaly flag, data source, and the **AIS Trust Factor**:
   $$\text{Trust} = \text{clip}\left(\frac{1}{1 + e^{8.0 \cdot (\text{jam\_score} - 0.35)}}, 0.05, 1.0\right)$$
 
 ### Model 4: Ship-to-Ship (STS) & Dark Vessel Screening (`sts_detector.py`)
-* **Dataset:** 2,007 Global Fishing Watch (GFW) 4Wings satellite radar detections and untracked dark vessel records.
-* **Function:** Analyzes anchorage vessel clustering. Flags suspicious moored proximity ($<250\text{m}$) and dark vessels operating within $1.5\text{km}$ radius on the claimed loading date.
+* **Data:** Global Fishing Watch (GFW) 4Wings SAR presence (all detections and dark, non-AIS detections) for Fujairah Anchorage, Khor Fakkan and Sohar, plus our own detections from the matched Sentinel-1 pass.
+* **Signals, strongest first:**
+  1. Two of our SAR hulls side by side: centres closer than half their summed lengths plus 100 m, headings within 25 degrees.
+  2. A GFW radar cell holding 2+ vessels on one date. GFW reports on a 0.01 deg (~1.1 km) grid, so it cannot resolve ships 100-250 m apart; the earlier "<250 m between GFW detections" rule could never fire.
+  3. Dark detections within 2 km of the claimed position, within ±1 day.
+* **Output:** STS risk score (0.05-0.95), counts, and a plain-language note, including when there is simply no GFW coverage.
 
 ### Model 5: Orbital Evidence Fusion Scorer (`fusion_model.py`)
-* **Architecture:** Gradient-Boosted Decision Tree (`HistGradientBoostingRegressor`).
+* **Architecture:** `HistGradientBoostingRegressor` with **monotonic constraints**: more radar evidence (detection, confidence, length match) can never lower the score, and more risk (length gap, radar/AIS mismatch, STS risk, dark vessels, days from the pass) can never raise it.
 * **Input Features (12):** `sar_detected`, `sar_confidence`, `length_match_ratio`, `length_delta_m`, `ais_reported`, `ais_trust_factor`, `discounted_ais_weight`, `jamming_score`, `radar_ais_discrepancy`, `sts_risk_score`, `dark_vessel_nearby`, `days_from_pass`.
-* **Output:** Calibrated **0–100 Orbital Evidence Score**, Risk Tier categorization (`LOW_RISK`, `MEDIUM_RISK`, `HIGH_RISK`), and an automated **Bank Compliance Memorandum**.
+* **Training data:** synthetic, from six scenarios (clean, ghost ship, jammed-but-genuine, STS transfer, size mismatch, dark with no jamming excuse). Length noise uses the detector's **measured** length error from the test backtest, not a guess.
+* **Output:** **0–100 Orbital Evidence Score**, Risk Tier (`LOW_RISK`, `MEDIUM_RISK`, `HIGH_RISK`), and an automated **Bank Compliance Memorandum**.
 
 ---
 
-## 4. Statistical Parameters & Validation Metrics
+## 4. Backtest Results
 
-### Core Model Performance Scorecard
+Every number below is on data the model did not train or tune on. Reproduce with the `backtest_*.py` scripts; raw results are in `reports/`.
 
-| Model Component | Metric | Score / Value | Description |
-|---|---|---|---|
-| **YOLO11n-SAR Ship Detector** | **mAP@50** | **0.8067 (80.7%)** | Mean Average Precision at IoU = 0.50 |
-| | **mAP@50-95** | **0.3551 (35.5%)** | Average mAP across strict IoU thresholds |
-| | **Recall (R)** | **0.8992 (89.9%)** | Vessel detection sensitivity (minimizes false misses) |
-| | **Precision (P)** | **0.7799 (78.0%)** | Bounding box spatial precision |
-| | **Inference Speed** | **46.1 ms** | Real-time CPU inference per 640x640 SAR scene |
-| **Jamming-Trust Model** | **Training Records** | **300,853 rows** | 60-day spatial coverage of the Persian Gulf |
-| | **R² Score** | **0.6874** | Spatio-temporal variance explained |
-| | **RMSE** | **0.0558** | Residual standard deviation on [0, 1] scale |
-| | **MAE** | **0.0280** | Mean absolute error |
-| | **Anomaly Contamination** | **5.0%** | Outlier interference threshold |
-| **Orbital Evidence Fusion Scorer** | **R² Score** | **0.9927** | **99.27%** variance explained across trade scenarios |
-| | **RMSE** | **2.283 points** | Root Mean Squared Error on 0–100 scale |
-| | **MAE** | **1.752 points** | Mean Absolute Error |
-| | **Median Residual** | **1.412 points** | Robust median prediction error |
-| | **95% Confidence Bound** | **±4.47 points** | Empirical error margin (1.96 x RMSE) |
+### SAR ship detector: OSSDD held-out test (1,000 chips, 4,715 ships)
+Confidence threshold chosen on val only; a detection matches a ship at IoU >= 0.3. `python backtest_sar_detector.py`
+
+| Metric | Earlier YOLO11n (upright boxes) | **YOLO11n-OBB (current)** |
+|---|---|---|
+| Precision | 0.789 | **0.857** |
+| Recall | 0.893 | **0.945** |
+| F1 | 0.838 | **0.899** |
+| False alarms / missed ships | 1,127 / 504 | **746 / 257** |
+| Native test mAP@50 / mAP@50-95 | 0.780 / 0.338 | **0.930 / 0.594** (rotated IoU) |
+| Hull length MAE | 18.7 m | **14.7 m** |
+| Length bias | +8.8 m | **+0.5 m** |
+| Lengths within ±20% (all / 50-100 m / 100-200 m / 200 m+) | 82% / 34% / 86% / 93% | **91% / 68% / 93% / 97%** |
+
+The earlier model's published numbers (mAP@50 0.807) came from a val set of about 50 ships; on the 1,000-chip test split it scores 0.780.
+
+### SAR ship detector on real Gulf scenes vs Global Fishing Watch
+GFW runs its own detector on the same Sentinel-1 passes. It is not perfect ground truth (it drops near-shore detections and small boats), so these are agreement figures. 64 passes, match radius 1.2 km. The scene threshold was chosen on September passes and judged on October passes. `python backtest_gfw.py --sentinel-dir <tif folder>`
+
+| October passes (held out) | Chip threshold (0.275) | **Scene threshold (0.05)** |
+|---|---|---|
+| GFW ships we also detect | 30% | **63%** |
+| Our detections confirmed by GFW | 91% | **87%** |
+| Per AOI (found / confirmed) | | Fujairah 64% / 87%, Khor Fakkan 50% / 79%, Sohar 77% / 100% |
+
+On full Earth Engine scenes the detector is less confident than on OSSDD chips (different processing chain), so the pipeline uses the scene threshold. Most misses are smaller vessels: 90% of our detections are over 125 m.
+
+### Jamming-Trust model: out-of-time
+Train before 2026-10-16, test on 2026-10-16 to 2026-10-30, aircraft-weighted. AUC is for jam score >= 0.25. `python backtest_jamming.py`
+
+| Method | MAE | AUC |
+|---|---|---|
+| Global mean | 0.058 | 0.50 |
+| Each cell's historical mean | 0.043 | 0.67 |
+| Earlier model (lat/lon/day-of-year), random split as originally reported | 0.027 | 0.96 |
+| Earlier model, same out-of-time test | 0.041 | 0.82 |
+| **Current model, gap-fill (neighbours observed that day)** | **0.024** | **0.96** |
+| Current model, forecast (no observations that day) | 0.042 | 0.85 |
+
+The earlier model's random split let it see the same cells on neighbouring days, so its reported score was optimistic. Gap-fill error stays flat across the three test weeks (0.025, 0.025, 0.022).
+
+### Fusion scorer: fresh scenarios with 10% feature noise
+Labels are synthetic, so this checks consistency, not real-world accuracy. Both models are scored on the current scenario generator, which favours the current model. `python fusion_model.py`
+
+| Metric | Earlier model | **Current model** |
+|---|---|---|
+| Risk tier correct | 80% | **98%** |
+| RMSE (0-100 scale) / R² | 12.8 / 0.78 | **4.7 / 0.97** |
+| Jammed-but-genuine correct | 52% | **96%** |
+| Dark vessel, no jamming excuse correct | 9% | **100%** |
+| Monotonicity violations | up to 11.7% | **0%** |
+
+### Known limitations
+* 10 m radar shows a ship of the right size at the right place; it cannot read the name or confirm the IMO.
+* The fusion scorer is trained on synthetic scenarios; real labelled fraud cases are needed to calibrate it.
+* The detector misses many vessels under ~100 m on real scenes (OSSDD is dominated by large ships).
+* Jamming data covers 2026-09-01 to 2026-10-30; later dates use the forecast model, whose error is close to a per-cell average.
 
 ---
 
@@ -203,13 +254,25 @@ pip install -r requirements.txt
 ```
 
 ### 2. Run the Benchmark Verification Suite
-Execute the end-to-end evaluation script covering Clean Shipments, Phantom Fraud, and Jamming Spoofing:
+Execute the end-to-end evaluation script covering Clean Shipments, Phantom Fraud, and Jamming Spoofing. It scores each scenario with the scripted SAR result and, when the Sentinel-1 clips are available, with the real detector:
 ```bash
+# the .tif clips are not in git: rebuild with 01_gee_sentinel.py, or point to them
+export BOO_SENTINEL_DIR=/path/to/data/sentinel
 python pipeline.py
 ```
 
+### Retrain and backtest
+```bash
+python 02b_ossdd_to_yolo.py --max-test 1000   # OSSDD -> data/ossdd_yolo (train/val/test)
+python train_sar_detector.py                  # YOLO11n-OBB -> models/sar_ship_obb
+python backtest_sar_detector.py               # -> reports/sar_backtest.json
+python backtest_gfw.py --sentinel-dir $BOO_SENTINEL_DIR   # -> reports/gfw_backtest.json
+python jamming_model.py && python backtest_jamming.py     # -> reports/jamming_backtest.json
+python fusion_model.py                        # -> reports/fusion_backtest.json
+```
+
 ### 3. Launch the Interactive Streamlit Dashboard
-Run the web application to test custom Bills of Lading and interact with the live Jamming Toggle:
+Run the web application to test custom Bills of Lading and interact with the live Jamming Toggle. The sidebar switch "Run real Sentinel-1 detector" uses the trained model on the matched pass (falls back to the scripted result, with a warning, if the clip or weights are missing):
 ```bash
 streamlit run app.py
 ```
@@ -223,19 +286,25 @@ SpaceWeek/
 ├── app.py                     # Streamlit interactive fintech dashboard
 ├── pipeline.py                # End-to-end multi-model orchestrator & benchmark suite
 ├── document_extractor.py      # NLP/Regex Bill of Lading claim extractor
-├── train_sar_detector.py      # Fine-tuning script for YOLO11n on SAR chips
-├── jamming_model.py           # Spatio-temporal GNSS jamming regressor & anomaly model
+├── train_sar_detector.py      # Fine-tuning script for YOLO11n-OBB on SAR chips
+├── sar_inference.py           # Detector on chips and full Sentinel-1 scenes (lat/lon, length)
+├── backtest_sar_detector.py   # OSSDD held-out test backtest
+├── backtest_gfw.py            # Real-scene comparison with Global Fishing Watch
+├── backtest_jamming.py        # Out-of-time jamming backtest
+├── jamming_model.py           # GNSS jamming gap-fill/forecast model & anomaly flag
 ├── sts_detector.py            # Ship-to-ship transfer & GFW dark vessel screener
 ├── fusion_model.py            # Gradient-Boosted Orbital Evidence Fusion Scorer
 ├── sar_preprocess.py          # SAR amplitude-to-dB and robust z-score normalizer
 ├── 02b_ossdd_to_yolo.py       # OSSDD WebDataset streaming converter
 ├── requirements.txt           # Environment dependencies
 ├── models/
-│   ├── sar_ship_yolo/
-│   │   ├── weights/best.pt    # Fine-tuned YOLO11n SAR weights (80.7% mAP50)
+│   ├── sar_ship_obb/
+│   │   ├── weights/best.pt    # YOLO11n-OBB SAR weights (used by the pipeline)
 │   │   └── results.png        # Training loss and mAP curves
+│   ├── sar_ship_yolo/         # Earlier upright-box model, kept for comparison
 │   ├── jamming_model.pkl      # Serialized GNSS jamming model
 │   └── fusion_scorer.pkl      # Serialized gradient-boosted decision tree scorer
+├── reports/                   # Backtest results (JSON/CSV)
 └── data/
     ├── jamming/               # 300k+ Gulf GNSS interference records
     ├── gfw/                   # Global Fishing Watch SAR radar & dark vessel archives
