@@ -11,11 +11,8 @@ Integrates:
 5. Gradient-Boosted Orbital Evidence Fusion Model (LightGBM/HistGB)
 """
 import os
-import glob
 import json
 import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
 
 from document_extractor import DocumentClaimExtractor
 from jamming_model import JammingTrustModel
@@ -24,7 +21,12 @@ from fusion_model import OrbitalEvidenceFusionModel
 
 REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 ACQUISITIONS_CSV = os.path.join(REPO_DIR, "data", "sentinel", "acquisitions.csv")
-YOLO_MODEL_PATH = os.path.join(REPO_DIR, "models", "sar_ship_yolo", "weights", "best.pt")
+# The .tif clips are git-ignored (rebuild with 01_gee_sentinel.py); point
+# BOO_SENTINEL_DIR at them if they live elsewhere.
+SENTINEL_DIR = os.environ.get("BOO_SENTINEL_DIR", os.path.join(REPO_DIR, "data", "sentinel"))
+SAR_BACKTEST = os.path.join(REPO_DIR, "reports", "sar_backtest.json")
+GFW_BACKTEST = os.path.join(REPO_DIR, "reports", "gfw_backtest.json")
+MIN_LENGTH_RATIO = 0.8  # a detection within ~20% of the claimed length counts as a match
 
 
 class BillOfOrbitPipeline:
@@ -38,81 +40,116 @@ class BillOfOrbitPipeline:
         self.fusion_model = OrbitalEvidenceFusionModel.load()
         self.acquisitions = pd.read_csv(ACQUISITIONS_CSV) if os.path.exists(ACQUISITIONS_CSV) else None
         self.yolo_model = None
+        self.det_conf = 0.25
+        self._scene_cache = {}
         self._init_yolo()
 
     def _init_yolo(self):
-        if os.path.exists(YOLO_MODEL_PATH):
-            try:
-                from ultralytics import YOLO
-                self.yolo_model = YOLO(YOLO_MODEL_PATH)
-                print(f"Loaded fine-tuned SAR ship detector from {YOLO_MODEL_PATH}")
-            except Exception as e:
-                print(f"Notice: YOLO model load: {e}")
-        else:
-            print(f"YOLO weights not found yet at {YOLO_MODEL_PATH} (training may be in progress).")
+        try:
+            from sar_inference import load_model
+            self.yolo_model = load_model()
+            name = os.path.basename(os.path.dirname(os.path.dirname(self.yolo_model.ckpt_path)))
+            # Full scenes: threshold chosen against GFW on September passes
+            # (backtest_gfw.py); fallback: the chip threshold chosen on OSSDD val.
+            gfw = json.load(open(GFW_BACKTEST)) if os.path.exists(GFW_BACKTEST) else {}
+            if gfw.get("scene_conf") is not None and os.path.basename(
+                    os.path.dirname(os.path.dirname(gfw.get("weights", "")))) == name:
+                self.det_conf = gfw["scene_conf"]
+            elif os.path.exists(SAR_BACKTEST):
+                self.det_conf = json.load(open(SAR_BACKTEST)).get(name, {}).get("conf_threshold_from_val", 0.25)
+            print(f"Loaded SAR ship detector {self.yolo_model.ckpt_path} (conf {self.det_conf})")
+        except Exception as e:
+            print(f"Notice: SAR detector unavailable ({e}); only scripted SAR results can be used.")
 
     def find_sentinel_pass(self, aoi, target_date, max_window_days=3):
-        """Find the closest Sentinel-1 acquisition pass within +/- max_window_days."""
+        """Closest Sentinel-1 pass for the AOI; flags passes outside the window."""
         if self.acquisitions is None:
-            return {"file": f"{aoi}_s1_synthetic.tif", "days_diff": 0}
-
-        target_dt = pd.to_datetime(target_date)
-        df_aoi = self.acquisitions[
-            (self.acquisitions["aoi"] == aoi) & 
-            (self.acquisitions["file"].str.contains("_s1_"))
-        ].copy()
-
-        if df_aoi.empty:
-            return {"file": f"{aoi}_s1_default.tif", "days_diff": 0}
-
-        # Extract date from filename or acquisition date
-        df_aoi["date_str"] = df_aoi["file"].apply(
-            lambda f: f.split("_s1_")[1][:8] if "_s1_" in f else ""
-        )
-        df_aoi["dt"] = pd.to_datetime(df_aoi["date_str"], format="%Y%m%d", errors="coerce")
-        df_aoi = df_aoi.dropna(subset=["dt"])
-
-        df_aoi["diff_days"] = (df_aoi["dt"] - target_dt).abs().dt.days
-        closest = df_aoi.sort_values(by="diff_days").iloc[0]
-
+            return None
+        df = self.acquisitions[(self.acquisitions["aoi"] == aoi) & (self.acquisitions["sensor"] == "s1")
+                               & self.acquisitions["file"].notna()].copy()
+        if df.empty:
+            return None
+        df["dt"] = pd.to_datetime(df["utc_time"].str.rstrip("Z"))
+        target = pd.to_datetime(target_date)
+        df["diff_days"] = (df["dt"].dt.normalize() - target).abs().dt.days
+        c = df.sort_values(["diff_days", "dt"]).iloc[0]
+        path = os.path.join(SENTINEL_DIR, c["file"])
         return {
-            "file": closest["file"],
-            "pass_date": closest["dt"].strftime("%Y-%m-%d"),
-            "days_diff": int(closest["diff_days"]),
+            "file": c["file"],
+            "path": path,
+            "pass_time_utc": c["utc_time"],
+            "pass_date": c["dt"].strftime("%Y-%m-%d"),
+            "orbit_pass": c.get("orbit_pass"),
+            "days_diff": int(c["diff_days"]),
+            "within_window": bool(c["diff_days"] <= max_window_days),
+            "image_available": os.path.exists(path),
         }
 
-    def verify_document(self, doc_text, simulated_sar_override=None, use_jamming_layer=True):
-        """
-        Process a Bill of Lading document and compute verification evidence.
-        """
-        # Step 1: Claim Extraction
-        claims = self.doc_extractor.extract_claims(doc_text)
+    def scene_detections(self, path):
+        if path not in self._scene_cache:
+            from sar_inference import detect_scene
+            self._scene_cache[path] = detect_scene(self.yolo_model, path, conf=self.det_conf)
+        return self._scene_cache[path]
 
-        # Step 2: Sentinel-1 Pass Alignment
+    def sar_evidence(self, claims, s1_pass, ais_recorded=True):
+        """Run the detector on the matched pass and pick the detection that best
+        matches the claimed vessel size. Radar cannot identify *which* ship it
+        is, so this shows whether a ship of the claimed size was there."""
+        if s1_pass is None or not s1_pass["image_available"] or self.yolo_model is None:
+            why = ("no Sentinel-1 pass listed for this AOI" if s1_pass is None else
+                   f"image {s1_pass['file']} not found in {SENTINEL_DIR}" if not s1_pass["image_available"]
+                   else "detector weights missing")
+            raise FileNotFoundError(f"Cannot run SAR detection: {why}")
+        dets = self.scene_detections(s1_pass["path"])
+        exp = float(claims["expected_length_m"])
+        best = None
+        for d in dets:
+            ratio = min(d["length_m"], exp) / max(d["length_m"], exp)
+            key = (ratio >= MIN_LENGTH_RATIO, ratio * d["conf"])
+            if best is None or key > best[0]:
+                best = (key, d, ratio)
+        result = {
+            "detected": best is not None,
+            "confidence": round(best[1]["conf"], 3) if best else 0.0,
+            "estimated_length_m": best[1]["length_m"] if best else 0.0,
+            "length_match": bool(best and best[2] >= MIN_LENGTH_RATIO),
+            "vessel_lat": best[1]["lat"] if best else None,
+            "vessel_lon": best[1]["lon"] if best else None,
+            "ships_in_scene": len(dets),
+            "size_matched_ships": sum(min(d["length_m"], exp) / max(d["length_m"], exp) >= MIN_LENGTH_RATIO for d in dets),
+            "pass_file": s1_pass["file"],
+            "days_from_pass": s1_pass["days_diff"],
+            "ais_recorded": ais_recorded,
+            "source": "Sentinel-1 detector",
+        }
+        return result, dets
+
+    def verify_document(self, doc_text, simulated_sar_override=None, use_jamming_layer=True, ais_recorded=True):
+        """Process a Bill of Lading and compute verification evidence.
+
+        simulated_sar_override: scripted SAR result (demo only). By default the
+        detector runs on the matched Sentinel-1 pass. ais_recorded: whether AIS
+        placed the vessel there (no Gulf AIS feed is wired in yet, so the
+        caller supplies it).
+        """
+        claims = self.doc_extractor.extract_claims(doc_text)
         s1_pass = self.find_sentinel_pass(claims["aoi"], claims["loading_date"])
 
-        # Step 3: SAR Ship Detection & Dimension Estimation
+        dets = None
         if simulated_sar_override is not None:
-            sar_result = simulated_sar_override
+            sar_result = dict(simulated_sar_override, source="scripted override (demo)")
         else:
-            # Run inference on sample chips or default based on pass
-            # Sentinel-1 resolution is 10m/pixel
-            sar_result = {
-                "detected": True,
-                "confidence": 0.91,
-                "estimated_length_m": claims["expected_length_m"] * 0.96,
-                "pass_file": s1_pass["file"],
-                "days_from_pass": s1_pass["days_diff"],
-                "ais_recorded": True,
-            }
+            sar_result, dets = self.sar_evidence(claims, s1_pass, ais_recorded)
+            if s1_pass and not s1_pass["within_window"]:
+                sar_result["note"] = f"Nearest pass is {s1_pass['days_diff']} days from the claimed date"
 
-        # Step 4: Jamming-Trust Assessment
         jamming_result = self.jamming_model.predict(claims["lat"], claims["lon"], claims["loading_date"])
 
-        # Step 5: STS & Dark Vessel Screening
-        sts_result = self.sts_detector.detect_sts_transfer(claims["lat"], claims["lon"], claims["loading_date"])
+        # look for STS around the matched vessel if radar located it, else the port
+        lat = sar_result.get("vessel_lat") or claims["lat"]
+        lon = sar_result.get("vessel_lon") or claims["lon"]
+        sts_result = self.sts_detector.detect_sts_transfer(lat, lon, claims["loading_date"], sar_detections=dets)
 
-        # Step 6: Gradient-Boosted Evidence Fusion
         final_result = self.fusion_model.score_shipment(
             claims=claims,
             sar_result=sar_result,
@@ -220,17 +257,24 @@ def run_synthetic_benchmarks():
         res = pipeline.verify_document(sc["text"], simulated_sar_override=sc["sar_override"])
         print(res["evaluation"]["compliance_memo"])
 
+        # same document, but with the real detector on the matched Sentinel-1 pass
+        try:
+            real = pipeline.verify_document(sc["text"], ais_recorded=sc["sar_override"]["ais_recorded"])
+            sd = real["sar_detection"]
+            print(f"REAL SAR on {sd['pass_file']} (+/-{sd['days_from_pass']} d): {sd['ships_in_scene']} ships, "
+                  f"{sd['size_matched_ships']} of claimed size; best {sd['estimated_length_m']:.0f} m "
+                  f"conf {sd['confidence']:.2f} -> score {real['evaluation']['orbital_evidence_score']}/100 "
+                  f"[{real['evaluation']['risk_tier']}]")
+        except FileNotFoundError as e:
+            print(f"REAL SAR skipped: {e}")
+
         if sc.get("test_jamming_toggle"):
-            # Demonstrate the core pitch moment: switch off jamming layer!
             res_no_jam = pipeline.verify_document(
                 sc["text"], simulated_sar_override=sc["sar_override"], use_jamming_layer=False
             )
-            score_with = res["evaluation"]["orbital_evidence_score"]
-            score_without = res_no_jam["evaluation"]["orbital_evidence_score"]
-            print("\n*** PITCH DEMO MOMENT: JAMMING LAYER TOGGLE ***")
-            print(f"With Jamming-Trust Layer ENABLED:  Evidence Score = {score_with}/100 (Radar validates ship despite AIS loss)")
-            print(f"With Jamming-Trust Layer DISABLED: Evidence Score = {score_without}/100 (Naive AIS check triggers false alarm!)")
-            print(f"Impact: Prevents a FALSE ALARM on a genuine ${claims_val:,} trade financing transaction!\n" if (claims_val := 45000000) else "")
+            print("\n*** JAMMING LAYER TOGGLE ***")
+            print(f"Jamming-Trust layer ON:  score {res['evaluation']['orbital_evidence_score']}/100")
+            print(f"Jamming-Trust layer OFF: score {res_no_jam['evaluation']['orbital_evidence_score']}/100")
 
 
 if __name__ == "__main__":

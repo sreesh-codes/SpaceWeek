@@ -37,140 +37,136 @@ FEATURE_NAMES = [
 ]
 
 
-def generate_training_data(n_samples=5000, random_state=42):
-    """
-    Generate synthetic trade finance ground-truth data spanning all operational scenarios:
-    1. Verified Clean Shipments (Radar ship detected, length matches, valid AIS or justified jamming)
-    2. Phantom / Ghost Shipments (Paper B/L exists, but satellite radar shows no vessel)
-    3. Jamming Spoofing Scenarios (AIS reported wrong position or disabled, radar confirms presence)
-    4. Undisclosed STS Transfers (Vessel present, but moored with dark tanker offshore)
-    5. Size Mismatch / Cargo Substitution (Vessel detected, but size 50%+ smaller than claimed)
-    """
+# +1: score may only rise with the feature, -1: only fall, 0: unconstrained.
+# Keeps the scorer sensible on inputs unlike the synthetic training cases.
+MONOTONIC = {
+    "sar_detected": 1, "sar_confidence": 1, "length_match_ratio": 1, "length_delta_m": -1,
+    "ais_reported": 0, "ais_trust_factor": 0, "discounted_ais_weight": 0, "jamming_score": 0,
+    "radar_ais_discrepancy": -1, "sts_risk_score": -1, "dark_vessel_nearby": -1, "days_from_pass": -1,
+}
+SCENARIOS = ["clean", "ghost", "jammed_genuine", "sts_transfer", "size_mismatch", "dark_no_excuse"]
+SCENARIO_P = [0.35, 0.20, 0.15, 0.10, 0.10, 0.10]
+# risk tiers each scenario should land in (used by backtest_fusion())
+EXPECTED_TIERS = {
+    "clean": {"LOW_RISK"}, "jammed_genuine": {"LOW_RISK"}, "ghost": {"HIGH_RISK"},
+    "sts_transfer": {"MEDIUM_RISK", "HIGH_RISK"}, "size_mismatch": {"MEDIUM_RISK", "HIGH_RISK"},
+    "dark_no_excuse": {"MEDIUM_RISK", "HIGH_RISK"},
+}
+CLASS_LENGTHS = [110, 160, 190, 228, 245, 274, 330]
+
+
+def _length_noise():
+    """Relative std of SAR length estimates, measured on the OSSDD test split
+    (reports/sar_backtest.json, ships >= 100 m) when available."""
+    try:
+        import json
+        bt = json.load(open(os.path.join(os.path.dirname(__file__), "reports", "sar_backtest.json")))
+        best = max(bt.values(), key=lambda r: r["test"]["f1"])
+        bins = [best["length_test"].get(k) for k in ("100-200m", "200-1000m")]
+        errs = [b["median_rel_err"] for b in bins if b]
+        if errs:
+            return float(np.clip(1.4826 * np.mean(errs), 0.05, 0.5))  # median abs err -> std
+    except Exception:
+        pass
+    return 0.15
+
+
+def generate_training_data(n_samples=6000, random_state=42, length_noise=None):
+    """Synthetic labelled cases. There is no labelled real-world fraud data, so
+    the scorer learns an expert-specified score per scenario; features are
+    generated consistently (length ratio and delta come from the same lengths,
+    SAR length carries the detector's measured error)."""
     rng = np.random.RandomState(random_state)
-    records = []
-
+    noise = _length_noise() if length_noise is None else length_noise
+    rows = []
     for _ in range(n_samples):
-        scenario = rng.choice(["clean", "ghost", "jammed_genuine", "sts_transfer", "size_mismatch"], 
-                              p=[0.40, 0.25, 0.15, 0.10, 0.10])
+        sc = rng.choice(SCENARIOS, p=SCENARIO_P)
+        days = int(rng.choice([0, 1, 2, 3]))
+        claimed = float(rng.choice(CLASS_LENGTHS))
+        true_len = claimed * rng.uniform(0.92, 1.05)  # class nominal vs real hull
+        jam = rng.uniform(0.0, 0.15)
+        ais, sts, dark = 1, rng.uniform(0.0, 0.15), 0
+        sar, conf = 1, rng.uniform(0.40, 0.95)
 
-        days_from_pass = rng.choice([0, 1, 2, 3])
+        if sc == "ghost":
+            sar, conf, true_len = 0, 0.0, 0.0
+            ais = int(rng.rand() < 0.3)  # AIS may be spoofed
+            jam = rng.uniform(0.0, 0.40)
+        elif sc == "jammed_genuine":
+            ais = int(rng.rand() < 0.25)
+            jam = rng.uniform(0.40, 0.90)
+            sts, dark = rng.uniform(0.0, 0.20), int(rng.rand() < 0.2)
+        elif sc == "sts_transfer":
+            jam = rng.uniform(0.10, 0.50)
+            sts, dark = rng.uniform(0.70, 0.98), 1
+        elif sc == "size_mismatch":
+            true_len = claimed * rng.uniform(0.30, 0.60)
+        elif sc == "dark_no_excuse":
+            ais = 0  # radar sees the ship, AIS silent, no jamming to explain it
 
-        if scenario == "clean":
-            # Real shipment verified on radar and AIS
-            sar_detected = 1
-            sar_confidence = rng.uniform(0.75, 0.98)
-            length_match_ratio = rng.uniform(0.85, 1.0)
-            claimed_length = rng.choice([160, 220, 245, 274, 330])
-            sar_length = claimed_length * rng.uniform(0.90, 1.10)
-            length_delta_m = abs(sar_length - claimed_length)
-            ais_reported = 1
-            jamming_score = rng.uniform(0.0, 0.15)
-            ais_trust_factor = rng.uniform(0.85, 1.0)
-            discounted_ais = ais_reported * ais_trust_factor
-            radar_ais_discrepancy = 0
-            sts_risk = rng.uniform(0.0, 0.15)
-            dark_nearby = 0
+        trust = float(np.clip(1.0 / (1.0 + np.exp(8.0 * (jam - 0.35))), 0.05, 1.0))
+        sar_len = true_len * max(0.1, 1 + rng.normal(0, noise)) if sar else 0.0
+        ratio = min(sar_len, claimed) / max(sar_len, claimed) if sar else 0.0
+        delta = abs(sar_len - claimed) if sar else 250.0
+        disc = int((sar == 0 and ais == 1) or (sar == 1 and ais == 0 and jam < 0.35))
 
-            # Target score: 85 - 98
-            score = 90.0 + 8.0 * (length_match_ratio - 0.85) / 0.15 - 3.0 * days_from_pass
-            score = np.clip(score + rng.normal(0, 2), 80, 99)
+        if sc == "clean":
+            score = 84 + 12 * ratio - 2.5 * days + 4 * (conf - 0.4)
+        elif sc == "ghost":
+            score = 22 + 6 * ais * trust - 4 * disc
+        elif sc == "jammed_genuine":
+            score = 80 + 10 * ratio - 2.5 * days + 4 * (conf - 0.4)
+        elif sc == "sts_transfer":
+            score = 66 - 25 * sts + 5 * ratio
+        elif sc == "size_mismatch":
+            score = 40 + 30 * ratio
+        else:
+            score = 50 + 8 * ratio - 2 * days
+        score = float(np.clip(score + rng.normal(0, 2.5), 5, 99))
 
-        elif scenario == "ghost":
-            # Paper fraud: Document claims loading, but no vessel on satellite radar
-            sar_detected = 0
-            sar_confidence = 0.0
-            length_match_ratio = 0.0
-            length_delta_m = 250.0
-            ais_reported = rng.choice([0, 1], p=[0.7, 0.3])  # AIS might be faked or off
-            jamming_score = rng.uniform(0.0, 0.40)
-            ais_trust_factor = max(0.1, 1.0 - 2.0 * jamming_score)
-            discounted_ais = ais_reported * ais_trust_factor
-            radar_ais_discrepancy = 1 if ais_reported == 1 else 0
-            sts_risk = 0.0
-            dark_nearby = 0
+        rows.append(dict(sar_detected=sar, sar_confidence=conf, length_match_ratio=ratio,
+                         length_delta_m=delta, ais_reported=ais, ais_trust_factor=trust,
+                         discounted_ais_weight=ais * trust, jamming_score=jam,
+                         radar_ais_discrepancy=disc, sts_risk_score=sts, dark_vessel_nearby=dark,
+                         days_from_pass=days, scenario=sc, orbital_evidence_score=round(score, 2)))
+    return pd.DataFrame(rows)
 
-            # Target score: 15 - 38
-            score = 25.0 + 10.0 * discounted_ais - 5.0 * radar_ais_discrepancy
-            score = np.clip(score + rng.normal(0, 3), 10, 42)
 
-        elif scenario == "jammed_genuine":
-            # Genuine vessel in GPS jamming corridor: AIS transponder went dark, but radar proves presence!
-            sar_detected = 1
-            sar_confidence = rng.uniform(0.70, 0.95)
-            length_match_ratio = rng.uniform(0.80, 0.98)
-            claimed_length = rng.choice([245, 274, 330])
-            sar_length = claimed_length * rng.uniform(0.88, 1.12)
-            length_delta_m = abs(sar_length - claimed_length)
-            ais_reported = rng.choice([0, 1], p=[0.75, 0.25])
-            jamming_score = rng.uniform(0.40, 0.90)  # High jamming
-            ais_trust_factor = rng.uniform(0.05, 0.30)  # Low trust in AIS
-            discounted_ais = ais_reported * ais_trust_factor
-            radar_ais_discrepancy = 0  # Not penalized because jamming explains AIS absence
-            sts_risk = rng.uniform(0.0, 0.20)
-            dark_nearby = rng.choice([0, 1], p=[0.8, 0.2])
+def risk_tier(score):
+    return "LOW_RISK" if score >= 80 else "MEDIUM_RISK" if score >= 50 else "HIGH_RISK"
 
-            # With jamming awareness, radar presence keeps score HIGH (75 - 92)
-            # Without jamming layer, an AIS-only check would incorrectly score it ~30!
-            score = 82.0 + 8.0 * (sar_confidence - 0.70) / 0.25 - 2.5 * days_from_pass
-            score = np.clip(score + rng.normal(0, 2.5), 72, 94)
 
-        elif scenario == "sts_transfer":
-            # Vessel is present, but moored with a dark vessel for illicit cargo transfer
-            sar_detected = 1
-            sar_confidence = rng.uniform(0.75, 0.95)
-            length_match_ratio = rng.uniform(0.75, 0.95)
-            claimed_length = rng.choice([245, 274, 330])
-            sar_length = claimed_length * rng.uniform(0.85, 1.15)
-            length_delta_m = abs(sar_length - claimed_length)
-            ais_reported = 1
-            jamming_score = rng.uniform(0.10, 0.50)
-            ais_trust_factor = rng.uniform(0.50, 0.90)
-            discounted_ais = ais_reported * ais_trust_factor
-            radar_ais_discrepancy = 0
-            sts_risk = rng.uniform(0.70, 0.98)  # High STS risk
-            dark_nearby = 1
-
-            # Target score penalized to 40 - 58
-            score = 65.0 - 25.0 * sts_risk + 5.0 * length_match_ratio
-            score = np.clip(score + rng.normal(0, 3), 35, 60)
-
-        else:  # size_mismatch
-            # Vessel detected, but physical radar dimensions do not match claimed B/L cargo size
-            sar_detected = 1
-            sar_confidence = rng.uniform(0.65, 0.90)
-            length_match_ratio = rng.uniform(0.30, 0.60)  # Severe mismatch
-            claimed_length = 274.0  # Suezmax
-            sar_length = claimed_length * length_match_ratio  # Handysize or tug
-            length_delta_m = abs(sar_length - claimed_length)
-            ais_reported = 1
-            jamming_score = rng.uniform(0.0, 0.20)
-            ais_trust_factor = 0.90
-            discounted_ais = 0.90
-            radar_ais_discrepancy = 1
-            sts_risk = 0.10
-            dark_nearby = 0
-
-            # Target score: 45 - 65
-            score = 52.0 + 15.0 * (length_match_ratio - 0.3) / 0.3
-            score = np.clip(score + rng.normal(0, 3), 40, 68)
-
-        records.append({
-            "sar_detected": sar_detected,
-            "sar_confidence": sar_confidence,
-            "length_match_ratio": length_match_ratio,
-            "length_delta_m": length_delta_m,
-            "ais_reported": ais_reported,
-            "ais_trust_factor": ais_trust_factor,
-            "discounted_ais_weight": discounted_ais,
-            "jamming_score": jamming_score,
-            "radar_ais_discrepancy": radar_ais_discrepancy,
-            "sts_risk_score": sts_risk,
-            "dark_vessel_nearby": dark_nearby,
-            "days_from_pass": days_from_pass,
-            "orbital_evidence_score": round(float(score), 2),
-        })
-
-    return pd.DataFrame(records)
+def backtest_fusion(model, n=3000, seed=7, feature_noise=0.0):
+    """Score fresh synthetic cases (new seed; optional extra noise on the
+    continuous SAR features) and check tiers per scenario + monotonicity."""
+    df = generate_training_data(n, random_state=seed)
+    X = df[FEATURE_NAMES].copy()
+    if feature_noise:
+        rng = np.random.RandomState(seed)
+        for c in ("sar_confidence", "length_match_ratio"):
+            X[c] = np.clip(X[c] + rng.normal(0, feature_noise, len(X)) * (X.sar_detected > 0), 0, 1)
+    pred = np.clip(model.predict(X), 0, 100)
+    out = {"rmse": float(np.sqrt(mean_squared_error(df.orbital_evidence_score, pred))),
+           "r2": float(r2_score(df.orbital_evidence_score, pred)), "tier_accuracy": {}}
+    ok_all = []
+    for sc in SCENARIOS:
+        m = (df.scenario == sc).to_numpy()
+        ok = np.array([risk_tier(p) in EXPECTED_TIERS[sc] for p in pred[m]])
+        out["tier_accuracy"][sc] = float(ok.mean()) if len(ok) else None
+        ok_all.append(ok)
+    out["tier_accuracy"]["all"] = float(np.concatenate(ok_all).mean())
+    # monotonicity: nudge each constrained feature and count violations
+    viol = {}
+    for f, s in MONOTONIC.items():
+        if s == 0:
+            continue
+        X2 = X.copy()
+        step = 1 if f in ("sar_detected", "radar_ais_discrepancy", "dark_vessel_nearby", "days_from_pass") else 0.1
+        X2[f] = X2[f] + step
+        d = np.clip(model.predict(X2), 0, 100) - pred
+        viol[f] = float(np.mean(d * s < -0.5))
+    out["monotonic_violation_rate"] = viol
+    return out
 
 
 class OrbitalEvidenceFusionModel:
@@ -181,27 +177,18 @@ class OrbitalEvidenceFusionModel:
         self.is_trained = False
 
     def fit(self, n_samples=6000):
-        print(f"Generating calibration dataset of {n_samples} maritime trade scenarios...")
+        print(f"Generating {n_samples} synthetic trade scenarios (length noise {_length_noise():.2f})...")
         df = generate_training_data(n_samples=n_samples)
-        X = df[FEATURE_NAMES]
-        y = df["orbital_evidence_score"]
-
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
-        print("Training HistGradientBoostingRegressor for Orbital Evidence Fusion...")
+        X_train, X_test, y_train, y_test = train_test_split(
+            df[FEATURE_NAMES], df["orbital_evidence_score"], test_size=0.2, random_state=42)
         self.model = HistGradientBoostingRegressor(
-            max_iter=200,
-            learning_rate=0.06,
-            max_depth=8,
-            min_samples_leaf=15,
-            random_state=42,
-        )
+            max_iter=300, learning_rate=0.05, max_depth=4, min_samples_leaf=30,
+            l2_regularization=1.0, monotonic_cst=[MONOTONIC[f] for f in FEATURE_NAMES],
+            early_stopping=True, n_iter_no_change=20, random_state=42)
         self.model.fit(X_train, y_train)
-
         preds = self.model.predict(X_test)
-        rmse = np.sqrt(mean_squared_error(y_test, preds))
-        r2 = r2_score(y_test, preds)
-        print(f"Model Training Results -> RMSE: {rmse:.2f}, R2 Score: {r2:.4f}")
+        print(f"Held-out synthetic RMSE {np.sqrt(mean_squared_error(y_test, preds)):.2f}, "
+              f"R2 {r2_score(y_test, preds):.4f}  (synthetic labels: this shows fit, not real-world accuracy)")
         self.is_trained = True
 
     def save(self, filepath=FUSION_MODEL_FILE):
@@ -270,12 +257,10 @@ class OrbitalEvidenceFusionModel:
             "days_from_pass": days_from_pass,
         }])[FEATURE_NAMES]
 
-        raw_score = float(np.clip(self.model.predict(features)[0], 0.0, 100.0))
-        if not use_jamming_layer and ais_rep == 0:
-            # Naive bank screening without electronic warfare / jamming awareness
-            # flags unverified transponder as a dark ship violation
-            raw_score = min(raw_score, 31.0)
-        final_score = round(raw_score, 1)
+        # No hard-coded cap for the jamming-off case: without the layer, a ship
+        # with AIS off looks like the "dark_no_excuse" scenario and the model
+        # scores it down on its own.
+        final_score = round(float(np.clip(self.model.predict(features)[0], 0.0, 100.0)), 1)
 
         # Risk Classification
         if final_score >= 80.0:
@@ -343,6 +328,12 @@ class OrbitalEvidenceFusionModel:
 
 
 if __name__ == "__main__":
+    import json
     fusion = OrbitalEvidenceFusionModel()
     fusion.fit()
     fusion.save()
+    rep = {"fresh_seed": backtest_fusion(fusion.model),
+           "fresh_seed_plus_feature_noise_0.1": backtest_fusion(fusion.model, feature_noise=0.1)}
+    os.makedirs(os.path.join(os.path.dirname(__file__), "reports"), exist_ok=True)
+    json.dump(rep, open(os.path.join(os.path.dirname(__file__), "reports", "fusion_backtest.json"), "w"), indent=1)
+    print(json.dumps(rep, indent=1))

@@ -12,7 +12,7 @@ downloaded_json_files/
 
 # large or rebuildable data (regenerate with the scripts)
 data/sentinel/*.tif
-data/ossdd_yolo/
+data/ossdd_yolo
 data/ossdd/
 data/jamming/days/
 # live AIS recording, still being appended to
@@ -20,5 +20,5 @@ data/ais/
 
 # temporary runs & baseline weights
 runs/
-yolo11n.pt
+yolo11n*.pt
 

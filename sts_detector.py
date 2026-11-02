@@ -1,21 +1,30 @@
 """Ship-to-Ship (STS) Transfer and Dark Vessel Detection Module.
 
 Part of Bill of Orbit (Theme 3 - Seas of Data).
-Identifies illicit or undisclosed offshore cargo transfers (such as Russian or Iranian
-crude STS transfers near Fujairah and Sohar) by analyzing vessel proximity,
-dual-hull radar signatures, and Global Fishing Watch dark SAR detections.
+Flags possible undisclosed offshore cargo transfers near the claimed vessel.
+
+Evidence, strongest first:
+  1. Our own Sentinel-1 detections (when the pipeline passes them in): two
+     hulls side by side - centres closer than half their summed lengths plus
+     100 m, with headings within 25 degrees.
+  2. Global Fishing Watch SAR presence: GFW reports ships on a 0.01 deg grid
+     (~1.1 km), so it cannot resolve two ships 100-250 m apart; the usable
+     signal is a single cell holding >= 2 detections on one date.
+  3. Dark detections (no AIS match) inside the search radius.
+(The earlier version looked for two GFW cells < 250 m apart, which the grid
+makes impossible, so it never fired.)
 """
-import os
 import glob
+import os
+from datetime import timedelta
+
 import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data", "gfw")
 
 
 def haversine_km(lat1, lon1, lat2, lon2):
-    """Haversine distance in kilometers."""
     R = 6371.0
     dlat = np.radians(lat2 - lat1)
     dlon = np.radians(lon2 - lon1)
@@ -24,119 +33,98 @@ def haversine_km(lat1, lon1, lat2, lon2):
     return 2.0 * R * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
 
 
+def _cells(files):
+    dfs = [pd.read_csv(f) for f in files]
+    if not dfs:
+        return pd.DataFrame(columns=["date", "lat", "lon", "detections"])
+    df = pd.concat(dfs, ignore_index=True)
+    return df.groupby(["date", "lat", "lon"], as_index=False)["detections"].sum()
+
+
+def side_by_side_pairs(dets, max_heading_diff=25.0, gap_m=100.0):
+    """Pairs of SAR detections (dicts with lat, lon, length_m, heading_deg)
+    lying alongside each other."""
+    pairs = []
+    for i in range(len(dets)):
+        for j in range(i + 1, len(dets)):
+            a, b = dets[i], dets[j]
+            d_m = haversine_km(a["lat"], a["lon"], b["lat"], b["lon"]) * 1000
+            if d_m > (a["length_m"] + b["length_m"]) / 2 + gap_m:
+                continue
+            if a.get("heading_deg") is not None and b.get("heading_deg") is not None:
+                dh = abs(a["heading_deg"] - b["heading_deg"]) % 180
+                if min(dh, 180 - dh) > max_heading_diff:
+                    continue
+            pairs.append((i, j, d_m))
+    return pairs
+
+
 class STSDetector:
-    """Detects Ship-to-Ship transfers and dark vessel proximity."""
-
     def __init__(self, data_dir=DATA_DIR):
-        self.data_dir = data_dir
-        self.df_all = None
-        self.df_dark = None
-        self._load_gfw_data()
+        self.cells_all = _cells(glob.glob(os.path.join(data_dir, "*_sar_all.csv")))
+        self.cells_dark = _cells(glob.glob(os.path.join(data_dir, "*_sar_dark.csv")))
+        print(f"STSDetector: {int(self.cells_all.detections.sum())} GFW SAR detections, "
+              f"{int(self.cells_dark.detections.sum())} dark.")
 
-    def _load_gfw_data(self):
-        """Load GFW all-SAR and dark-SAR detection datasets."""
-        all_files = glob.glob(os.path.join(self.data_dir, "*_sar_all.csv"))
-        dark_files = glob.glob(os.path.join(self.data_dir, "*_sar_dark.csv"))
+    def _near(self, cells, lat, lon, start, end, radius_km):
+        sub = cells[(cells.date >= start) & (cells.date <= end)].copy()
+        if sub.empty:
+            return sub.assign(dist_m=[])
+        sub["dist_m"] = haversine_km(lat, lon, sub.lat.to_numpy(), sub.lon.to_numpy()) * 1000
+        return sub[sub.dist_m <= radius_km * 1000]
 
-        dfs_all = [pd.read_csv(f) for f in all_files if os.path.exists(f)]
-        dfs_dark = [pd.read_csv(f) for f in dark_files if os.path.exists(f)]
+    def detect_sts_transfer(self, target_lat, target_lon, target_date, radius_km=2.0,
+                            window_days=1, sar_detections=None):
+        """sar_detections: optional list of our detections from the matched
+        Sentinel-1 pass (sar_inference.detect_scene output)."""
+        t = pd.to_datetime(target_date)
+        start = (t - timedelta(days=window_days)).strftime("%Y-%m-%d")
+        end = (t + timedelta(days=window_days)).strftime("%Y-%m-%d")
 
-        self.df_all = pd.concat(dfs_all, ignore_index=True) if dfs_all else pd.DataFrame()
-        self.df_dark = pd.concat(dfs_dark, ignore_index=True) if dfs_dark else pd.DataFrame()
+        near_all = self._near(self.cells_all, target_lat, target_lon, start, end, radius_km)
+        near_dark = self._near(self.cells_dark, target_lat, target_lon, start, end, radius_km)
+        crowded = near_all[near_all.detections >= 2]
+        dark_count = int(near_dark.detections.sum()) if len(near_dark) else 0
 
-        print(f"STSDetector loaded {len(self.df_all)} GFW radar detections and {len(self.df_dark)} dark vessel detections.")
+        sar_pairs = []
+        if sar_detections:
+            near = [d for d in sar_detections
+                    if haversine_km(target_lat, target_lon, d["lat"], d["lon"]) <= radius_km]
+            sar_pairs = [(near[i], near[j], d) for i, j, d in side_by_side_pairs(near)]
 
-    def detect_sts_transfer(self, target_lat, target_lon, target_date, radius_km=1.5, window_days=1):
-        """
-        Check if the target vessel was involved in or adjacent to a ship-to-ship transfer
-        or dark vessel interaction.
-
-        Returns:
-            dict containing:
-                - sts_detected: bool
-                - dark_vessel_nearby: bool
-                - nearby_vessels_count: int
-                - dark_vessels_count: int
-                - min_distance_m: float
-                - involved_vessels: list
-                - risk_score: float (0.0 to 1.0)
-                - notes: str
-        """
-        if self.df_all.empty:
-            return {"sts_detected": False, "notes": "No GFW data available"}
-
-        target_dt = pd.to_datetime(target_date)
-        date_start = (target_dt - timedelta(days=window_days)).strftime("%Y-%m-%d")
-        date_end = (target_dt + timedelta(days=window_days)).strftime("%Y-%m-%d")
-
-        # 1. Check all vessels in time window
-        sub_all = self.df_all[
-            (self.df_all["date"] >= date_start) & (self.df_all["date"] <= date_end)
-        ].copy()
-
-        # 2. Check dark vessels in time window
-        sub_dark = self.df_dark[
-            (self.df_dark["date"] >= date_start) & (self.df_dark["date"] <= date_end)
-        ].copy()
-
-        sts_detected = False
-        dark_nearby = False
-        min_dist_m = 99999.0
-        nearby_ships = []
-        dark_count = 0
-
-        if not sub_all.empty:
-            dists = haversine_km(target_lat, target_lon, sub_all["lat"].values, sub_all["lon"].values) * 1000.0
-            sub_all["dist_m"] = dists
-            close = sub_all[(sub_all["dist_m"] <= radius_km * 1000.0) & (sub_all["dist_m"] > 10.0)]
-            if len(close) > 0:
-                min_dist_m = float(close["dist_m"].min())
-                for _, r in close.iterrows():
-                    ship = r.get("shipName") if pd.notnull(r.get("shipName")) else f"MMSI:{r.get('mmsi', 'Unknown')}"
-                    nearby_ships.append({
-                        "ship": str(ship),
-                        "distance_m": round(float(r["dist_m"]), 1),
-                        "date": str(r["date"]),
-                        "type": str(r.get("vesselType", "UNKNOWN")),
-                    })
-                # If two vessels are moored side-by-side (< 250m apart) in open anchorage
-                if min_dist_m < 250.0:
-                    sts_detected = True
-
-        if not sub_dark.empty:
-            dists_dark = haversine_km(target_lat, target_lon, sub_dark["lat"].values, sub_dark["lon"].values) * 1000.0
-            sub_dark["dist_m"] = dists_dark
-            close_dark = sub_dark[sub_dark["dist_m"] <= radius_km * 1000.0]
-            dark_count = len(close_dark)
-            if dark_count > 0:
-                dark_nearby = True
-                min_dark_dist = float(close_dark["dist_m"].min())
-                min_dist_m = min(min_dist_m, min_dark_dist)
-                if min_dark_dist < 300.0:
-                    sts_detected = True
-
-        # Calculate STS risk score
-        risk = 0.0
-        if sts_detected and dark_nearby:
+        sts_detected = bool(sar_pairs) or len(crowded) > 0
+        dark_nearby = dark_count > 0
+        if sar_pairs and dark_nearby:
             risk = 0.95
-            notes = f"CRITICAL: Probable illicit Ship-to-Ship (STS) transfer detected! Vessel was moored within {min_dist_m:.0f}m of an untracked (dark) vessel."
-        elif sts_detected:
+            notes = (f"CRITICAL: two hulls side by side ({sar_pairs[0][2]:.0f} m apart) on Sentinel-1 "
+                     f"with {dark_count} dark (non-AIS) detection(s) within {radius_km} km.")
+        elif sts_detected and dark_nearby:
+            risk = 0.85
+            notes = (f"HIGH RISK: vessels clustered within one ~1 km radar cell and {dark_count} dark "
+                     f"detection(s) within {radius_km} km.")
+        elif sar_pairs:
             risk = 0.75
-            notes = f"HIGH RISK: Ship-to-Ship (STS) transfer observed within {min_dist_m:.0f}m of another vessel in offshore anchorage."
+            notes = f"HIGH RISK: two hulls side by side ({sar_pairs[0][2]:.0f} m apart) on Sentinel-1."
+        elif sts_detected:
+            risk = 0.6
+            notes = f"ELEVATED: {len(crowded)} radar cell(s) within {radius_km} km hold 2+ vessels on one date."
         elif dark_nearby:
             risk = 0.45
-            notes = f"SUSPICIOUS: {dark_count} dark vessel(s) detected by radar within {radius_km} km on {target_date}."
+            notes = f"SUSPICIOUS: {dark_count} dark vessel detection(s) within {radius_km} km around {target_date}."
         else:
             risk = 0.05
-            notes = "NORMAL: No abnormal vessel clustering or STS transfers detected."
+            notes = "NORMAL: no vessel clustering or dark detections near the claimed position."
+        if near_all.empty and near_dark.empty and not sar_detections:
+            notes += " (No GFW coverage for this place/date: absence of evidence only.)"
 
         return {
             "sts_detected": sts_detected,
             "dark_vessel_nearby": dark_nearby,
-            "nearby_vessels_count": len(nearby_ships),
+            "nearby_vessels_count": int(near_all.detections.sum()) if len(near_all) else 0,
             "dark_vessels_count": dark_count,
-            "min_distance_m": round(min_dist_m, 1) if min_dist_m < 90000 else None,
-            "nearby_vessels": nearby_ships[:5],
+            "crowded_cells": int(len(crowded)),
+            "sar_side_by_side_pairs": len(sar_pairs),
+            "min_distance_m": round(float(near_all.dist_m.min()), 1) if len(near_all) else None,
             "sts_risk_score": round(risk, 3),
             "notes": notes,
         }
@@ -144,12 +132,8 @@ class STSDetector:
 
 if __name__ == "__main__":
     detector = STSDetector()
-    print("\n--- Test Query 1: Fujairah Anchorage (2026-10-16) ---")
-    res1 = detector.detect_sts_transfer(25.13, 56.48, "2026-10-16")
-    for k, v in res1.items():
-        print(f"  {k}: {v}")
-
-    print("\n--- Test Query 2: Khor Fakkan (2026-09-15) ---")
-    res2 = detector.detect_sts_transfer(25.35, 56.40, "2026-09-15")
-    for k, v in res2.items():
-        print(f"  {k}: {v}")
+    for name, lat, lon, d in [("Fujairah Anchorage", 25.13, 56.48, "2026-10-16"),
+                              ("Khor Fakkan", 25.35, 56.40, "2026-09-15")]:
+        print(f"\n--- {name} ({d}) ---")
+        for k, v in detector.detect_sts_transfer(lat, lon, d).items():
+            print(f"  {k}: {v}")

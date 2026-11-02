@@ -127,6 +127,7 @@ Notify Party: First Abu Dhabi Bank Trade Desk""",
 # Sidebar
 st.sidebar.header("⚙️ Inspection Controls")
 preset_name = st.sidebar.selectbox("Load Test Scenario", list(PRESETS.keys()))
+use_real_sar = st.sidebar.toggle("Run real Sentinel-1 detector", value=True, help="Off = use the preset's scripted SAR result (demo). On = run the trained detector on the matched Sentinel-1 pass (needs the .tif clips locally).")
 use_jamming_layer = st.sidebar.toggle("Enable Jamming-Trust Layer", value=True, help="Accounting for GNSS jamming in the Gulf prevents false alarms when ships disable AIS due to electronic interference.")
 
 st.sidebar.markdown("---")
@@ -137,7 +138,15 @@ doc_input = st.text_area("Bill of Lading / Letter of Credit Document Text", PRES
 
 if st.button("🚀 Run Orbital Verification", type="primary"):
     sar_override = PRESETS[preset_name]["sar_override"]
-    res = pipeline.verify_document(doc_input, simulated_sar_override=sar_override, use_jamming_layer=use_jamming_layer)
+    res = None
+    if use_real_sar:
+        try:
+            res = pipeline.verify_document(doc_input, use_jamming_layer=use_jamming_layer,
+                                           ais_recorded=sar_override["ais_recorded"])
+        except FileNotFoundError as e:
+            st.warning(f"Real detection unavailable ({e}). Showing the preset's scripted SAR result instead.")
+    if res is None:
+        res = pipeline.verify_document(doc_input, simulated_sar_override=sar_override, use_jamming_layer=use_jamming_layer)
 
     claims = res["claims"]
     eval_res = res["evaluation"]
@@ -171,12 +180,20 @@ if st.button("🚀 Run Orbital Verification", type="primary"):
             st.write(f"- Detection Confidence: `{res['sar_detection']['confidence']:.2f}`")
             st.write(f"- Physical Radar Length: `{res['sar_detection']['estimated_length_m']:.1f} meters`")
             st.write(f"- Claimed Tanker Class: `{claims['inferred_vessel_class']}` (Expected `{claims['expected_length_m']}m`)")
-            st.write(f"- Satellite Pass File: `{res['sar_detection']['pass_file']}`")
+            st.write(f"- Satellite Pass File: `{res['sar_detection']['pass_file']}` (±{res['sar_detection'].get('days_from_pass', 0)} days)")
+            st.write(f"- Source: `{res['sar_detection'].get('source', '')}`")
+            if "ships_in_scene" in res["sar_detection"]:
+                st.write(f"- Ships in scene: `{res['sar_detection']['ships_in_scene']}` "
+                         f"(`{res['sar_detection']['size_matched_ships']}` within 20% of claimed length)")
+            if res["sar_detection"].get("note"):
+                st.warning(res["sar_detection"]["note"])
 
         with tab2:
             st.markdown(f"**Spatio-Temporal GNSS Interference Anomaly Model:**")
             st.write(f"- Jamming Intensity at Port: `{res['jamming_analysis']['jam_score']:.3f}`")
-            st.write(f"- Anomaly Status: `{'INTERFERENCE DETECTED' if res['jamming_analysis']['is_jammed'] else 'NORMAL GNSS'}`")
+            st.write(f"- Anomaly Status: `{'INTERFERENCE DETECTED' if res['jamming_analysis']['is_jammed'] else 'NORMAL GNSS'}`"
+                     f"{' (unusual for this area)' if res['jamming_analysis']['is_anomaly'] else ''}")
+            st.write(f"- Source: `{res['jamming_analysis']['source']}`")
             st.write(f"- AIS Trust Multiplier: `{res['jamming_analysis']['ais_trust_factor']:.3f}`")
             st.info(res['jamming_analysis']['explanation'])
 
@@ -186,15 +203,16 @@ if st.button("🚀 Run Orbital Verification", type="primary"):
         with tab3:
             st.markdown(f"**Ship-to-Ship (STS) & Dark Vessel Screening:**")
             st.write(f"- Offshore STS Mooring Flag: `{'CRITICAL: STS DETECTED' if res['sts_analysis']['sts_detected'] else 'CLEAN / NO STS'}`")
-            st.write(f"- Dark Vessels in 1.5km Radius: `{res['sts_analysis']['dark_vessels_count']}`")
-            st.write(f"- Min Distance to Nearby Vessels: `{res['sts_analysis']['min_distance_m']}m`")
+            st.write(f"- Dark Vessels within 2 km: `{res['sts_analysis']['dark_vessels_count']}`")
+            st.write(f"- Radar cells with 2+ vessels: `{res['sts_analysis']['crowded_cells']}`, "
+                     f"side-by-side hull pairs on Sentinel-1: `{res['sts_analysis']['sar_side_by_side_pairs']}`")
             st.write(f"- Analysis Note: {res['sts_analysis']['notes']}")
 
         # Map visualization
         st.subheader("📍 Geospatial Anchorage Position")
         map_data = pd.DataFrame([{
-            "lat": claims["lat"],
-            "lon": claims["lon"],
+            "lat": res["sar_detection"].get("vessel_lat") or claims["lat"],
+            "lon": res["sar_detection"].get("vessel_lon") or claims["lon"],
             "vessel": claims["vessel_name"]
         }])
         st.map(map_data, zoom=9)
