@@ -521,6 +521,14 @@ with tab_map:
     st.subheader("Persian Gulf & Gulf of Oman Geospatial Operations")
     st.caption("Strategic anchorages, electronic warfare corridors, and active maritime trade positions.")
 
+    import math
+    def haversine_km(lat1, lon1, lat2, lon2):
+        R = 6371.0
+        dlat = math.radians(lat2 - lat1)
+        dlon = math.radians(lon2 - lon1)
+        a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
+        return round(R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)), 1)
+
     # Strategic Anchorages
     anchorages = [
         {"name": "Fujairah Anchorage (UAE)", "short": "Fujairah", "lat": 25.13, "lon": 56.44, "threat": "Low EW / High Commercial Traffic", "vessels": 48},
@@ -535,7 +543,7 @@ with tab_map:
 
     with col_anc_info:
         st.markdown("#### Strategic Anchorage Registry")
-        st.caption("Select an anchorage to highlight and focus its coordinates on the map:")
+        st.caption("Select an anchorage to highlight and focus its coordinates:")
         anc_options = ["Show All Anchorages"] + [a["name"] for a in anchorages]
         selected_anc_name = st.selectbox("Focus & Locate Anchorage:", anc_options, index=0)
 
@@ -545,147 +553,62 @@ with tab_map:
     vessel_display_name = claims.get("vessel_name", "MT SEA EMPRESS")
     imo_display = claims.get("imo", "9412345")
 
-    # Map Legend Banner above the map
     with col_map_view:
+        # Tactical Legend Bar
         st.markdown(f"""
-        <div style="background-color: #111827; border: 1px solid #1f2937; border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; font-size: 0.85rem;">
-            <div><span style="color: #38bdf8; font-weight: 800; font-size: 1.1rem;">●</span> <strong style="color: #38bdf8;">CYAN:</strong> Inspected Ship (<strong>{vessel_display_name}</strong> - Currently Audited)</div>
-            <div><span style="color: #ef4444; font-weight: 800; font-size: 1.1rem;">●</span> <strong style="color: #ef4444;">RED:</strong> Strategic Anchorages & Chokepoints</div>
-            <div><span style="color: #facc15; font-weight: 800; font-size: 1.1rem;">●</span> <strong style="color: #facc15;">YELLOW:</strong> Selected / Focused Port</div>
+        <div style="background-color: #111827; border: 1px solid #1f2937; border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; display: flex; gap: 18px; align-items: center; flex-wrap: wrap; font-size: 0.85rem;">
+            <div><span style="color: #00e5ff; font-weight: 900; font-size: 1.2rem;">●</span> <strong style="color: #00e5ff;">CYAN DOT:</strong> Inspected Ship (<strong>{vessel_display_name}</strong> - Tracked Now)</div>
+            <div><span style="color: #facc15; font-weight: 900; font-size: 1.2rem;">●</span> <strong style="color: #facc15;">YELLOW DOT:</strong> Selected / Focused Port</div>
+            <div><span style="color: #ef4444; font-weight: 900; font-size: 1.2rem;">●</span> <strong style="color: #ef4444;">RED DOTS:</strong> Strategic Regional Anchorages</div>
         </div>
         """, unsafe_allow_html=True)
 
-        # Build Anchorage Dataframe with dynamic styling
-        anc_records = []
-        is_focused = (selected_anc_name != "Show All Anchorages")
-        focused_coords = None
+        # Build combined points dataframe with colors and sizes
+        map_points = []
+        focused_anc_data = None
 
         for a in anchorages:
-            selected_match = (a["name"] == selected_anc_name)
-            if selected_match:
-                focused_coords = (a["lat"], a["lon"])
-                color = [250, 204, 21, 255]  # Bright golden yellow
-                radius = 26000
-                label_text = f"★ {a['short'].upper()} (FOCUSED)"
+            is_this_selected = (a["name"] == selected_anc_name)
+            if is_this_selected:
+                focused_anc_data = a
+                p_color = "#facc15"  # Bright Golden Yellow
+                p_size = 55
             else:
-                color = [239, 68, 68, 220]  # Coral red
-                radius = 14000
-                label_text = a["short"]
+                p_color = "#ef4444"  # Coral Red
+                p_size = 22
 
-            anc_records.append({
-                "name": a["name"],
-                "short": a["short"],
+            map_points.append({
                 "lat": a["lat"],
                 "lon": a["lon"],
-                "threat": a["threat"],
-                "vessels": a["vessels"],
-                "color": color,
-                "radius": radius,
-                "label": label_text,
-                "category": "Strategic Regional Anchorage"
+                "name": a["name"],
+                "color": p_color,
+                "size": p_size
             })
 
-        df_anc = pd.DataFrame(anc_records)
-
-        # Inspected Ship Layer (Bright Cyan with Outer Pulse Ring)
-        ship_record = [{
-            "name": f"AUDITED TARGET: {vessel_display_name}",
-            "short": vessel_display_name,
+        # Add Inspected Target Ship (Bright Cyan, Size 45)
+        map_points.append({
             "lat": active_lat,
             "lon": active_lon,
-            "threat": f"Audited Shipment: {claims.get('cargo', 'Crude Oil')} ({claims.get('quantity_mt', 0):,.0f} MT) | Score: {score:.1f}/100 [{risk_tier}]",
-            "vessels": 1,
-            "color": [56, 189, 248, 255],  # Electric Neon Cyan
-            "radius": 22000,
-            "label": f"🎯 TRACKING: {vessel_display_name} (IMO: {imo_display})",
-            "category": "Inspected Vessel under Bill of Lading"
-        }]
-        df_ship = pd.DataFrame(ship_record)
+            "name": f"TARGET VESSEL: {vessel_display_name}",
+            "color": "#00e5ff",
+            "size": 45
+        })
 
-        # Outer Pulse Halo for Ship
-        ship_halo = [{
-            "lat": active_lat,
-            "lon": active_lon,
-            "color": [56, 189, 248, 70],
-            "radius": 42000
-        }]
-        df_ship_halo = pd.DataFrame(ship_halo)
+        df_map_points = pd.DataFrame(map_points)
 
-        # Layers assembly
-        layers = [
-            # Ship outer halo
-            pdk.Layer(
-                "ScatterplotLayer",
-                data=df_ship_halo,
-                get_position=["lon", "lat"],
-                get_color="color",
-                get_radius="radius",
-                pickable=False
-            ),
-            # Anchorages
-            pdk.Layer(
-                "ScatterplotLayer",
-                data=df_anc,
-                get_position=["lon", "lat"],
-                get_color="color",
-                get_radius="radius",
-                pickable=True
-            ),
-            # Inspected ship main marker
-            pdk.Layer(
-                "ScatterplotLayer",
-                data=df_ship,
-                get_position=["lon", "lat"],
-                get_color="color",
-                get_radius="radius",
-                pickable=True
-            ),
-            # Labels on map
-            pdk.Layer(
-                "TextLayer",
-                data=df_anc,
-                get_position=["lon", "lat"],
-                get_text="label",
-                get_size=12,
-                get_color=[241, 245, 249],
-                get_pixel_offset=[14, -12]
-            ),
-            pdk.Layer(
-                "TextLayer",
-                data=df_ship,
-                get_position=["lon", "lat"],
-                get_text="label",
-                get_size=13,
-                get_color=[56, 189, 248],
-                get_pixel_offset=[14, 14]
-            )
-        ]
+        # Render native robust Streamlit map with Carto dark tiles
+        st.map(df_map_points, latitude="lat", longitude="lon", color="color", size="size")
 
-        # Dynamic Viewpoint: center on focused anchorage if selected, else Gulf overview
-        if is_focused and focused_coords:
-            center_lat, center_lon, zoom_level = focused_coords[0], focused_coords[1], 8.4
+        # Tactical Status Box below map
+        if focused_anc_data:
+            dist = haversine_km(active_lat, active_lon, focused_anc_data["lat"], focused_anc_data["lon"])
+            dist_desc = f"{dist} km from {vessel_display_name}" if dist > 0.5 else f"Inspected vessel is anchored right here! (0.0 km)"
+            st.info(f"**Focused Port: {focused_anc_data['name']}** (`{focused_anc_data['lat']}°N, {focused_anc_data['lon']}°E`)\n\n"
+                    f"• **Distance from Inspected Ship:** {dist_desc}\n\n"
+                    f"• **Threat Profile:** {focused_anc_data['threat']}\n\n"
+                    f"• **Active Monitored Traffic:** {focused_anc_data['vessels']} commercial vessels")
         else:
-            center_lat, center_lon, zoom_level = 25.5, 55.0, 6.7
-
-        view_state = pdk.ViewState(
-            latitude=center_lat,
-            longitude=center_lon,
-            zoom=zoom_level,
-            pitch=15
-        )
-
-        tooltip_config = {
-            "html": "<div style='font-family: sans-serif; padding: 6px; color: #fff;'><b>{name}</b><br/><span style='color: #38bdf8;'>{category}</span><br/>Coordinates: {lat}°N, {lon}°E<br/>Threat / Info: {threat}</div>",
-            "style": {"backgroundColor": "#0f172a", "color": "white", "fontSize": "12px", "borderRadius": "6px"}
-        }
-
-        deck = pdk.Deck(
-            layers=layers,
-            initial_view_state=view_state,
-            tooltip=tooltip_config,
-            map_style="mapbox://styles/mapbox/dark-v10"
-        )
-        st.pydeck_chart(deck, use_container_width=True)
+            st.caption(f"Currently tracking **{vessel_display_name}** (IMO: {imo_display}) at `{active_lat:.2f}°N, {active_lon:.2f}°E`. Select any port on the right to focus.")
 
     # Details panel in col_anc_info
     with col_anc_info:
