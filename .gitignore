@@ -22,3 +22,6 @@ data/ais/
 runs/
 yolo11n*.pt
 
+# presentation PDFs and scripts
+reports/*.pdf
+generate_pitch_deck_pdf.py
