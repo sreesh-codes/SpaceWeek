@@ -1,0 +1,231 @@
+{
+ "weights": "/Users/sreeshsundar/Downloads/boo-model/models/sar_ship_obb/weights/best.pt",
+ "match_km": 1.2,
+ "tune_dates": "< 2026-10-01",
+ "chip_conf": 0.275,
+ "scene_conf": 0.05,
+ "held_out_at_chip_conf": {
+  "passes": 30,
+  "gfw_ships": 729,
+  "our_detections": 223,
+  "gfw_recall": 0.3004115226337449,
+  "agreement": 0.905829596412556,
+  "f1": 0.45118947448940566,
+  "count_corr": 0.3842234644706756
+ },
+ "summary": {
+  "held_out": {
+   "passes": 30,
+   "gfw_ships": 729,
+   "our_detections": 590,
+   "gfw_recall": 0.6268861454046639,
+   "agreement": 0.8711864406779661,
+   "f1": 0.7291164858086464,
+   "count_corr": 0.5171495892313688
+  },
+  "tune": {
+   "passes": 34,
+   "gfw_ships": 779,
+   "our_detections": 762,
+   "gfw_recall": 0.637997432605905,
+   "agreement": 0.7742782152230971,
+   "f1": 0.6995624603375307,
+   "count_corr": 0.48692127955313513
+  },
+  "held_out_fujairah_anchorage": {
+   "passes": 12,
+   "gfw_ships": 367,
+   "our_detections": 351,
+   "gfw_recall": 0.6430517711171662,
+   "agreement": 0.8717948717948718,
+   "f1": 0.7401531224056821,
+   "count_corr": 0.3890682170530769
+  },
+  "held_out_khor_fakkan": {
+   "passes": 11,
+   "gfw_ships": 216,
+   "our_detections": 147,
+   "gfw_recall": 0.5,
+   "agreement": 0.7891156462585034,
+   "f1": 0.6121372031662269,
+   "count_corr": 0.2027614042990993
+  },
+  "held_out_sohar": {
+   "passes": 7,
+   "gfw_ships": 146,
+   "our_detections": 92,
+   "gfw_recall": 0.773972602739726,
+   "agreement": 1.0,
+   "f1": 0.8725868725868726,
+   "count_corr": 0.8595922036993738
+  },
+  "our_length_m_quantiles": {
+   "p10": 125.34,
+   "p50": 187.3,
+   "p90": 273.1,
+   "max": 390.3
+  }
+ },
+ "sweep": {
+  "0.05": {
+   "tune": {
+    "passes": 34,
+    "gfw_ships": 779,
+    "our_detections": 762,
+    "gfw_recall": 0.637997432605905,
+    "agreement": 0.7742782152230971,
+    "f1": 0.6995624603375307,
+    "count_corr": 0.48692127955313513
+   },
+   "held_out": {
+    "passes": 30,
+    "gfw_ships": 729,
+    "our_detections": 590,
+    "gfw_recall": 0.6268861454046639,
+    "agreement": 0.8711864406779661,
+    "f1": 0.7291164858086464,
+    "count_corr": 0.5171495892313688
+   }
+  },
+  "0.075": {
+   "tune": {
+    "passes": 34,
+    "gfw_ships": 779,
+    "our_detections": 657,
+    "gfw_recall": 0.5712451861360719,
+    "agreement": 0.776255707762557,
+    "f1": 0.6581551645387911,
+    "count_corr": 0.49991178770110445
+   },
+   "held_out": {
+    "passes": 30,
+    "gfw_ships": 729,
+    "our_detections": 498,
+    "gfw_recall": 0.5486968449931413,
+    "agreement": 0.8775100401606426,
+    "f1": 0.6751993634276025,
+    "count_corr": 0.4918162037131474
+   }
+  },
+  "0.1": {
+   "tune": {
+    "passes": 34,
+    "gfw_ships": 779,
+    "our_detections": 573,
+    "gfw_recall": 0.5301668806161746,
+    "agreement": 0.7766143106457243,
+    "f1": 0.6301516876277208,
+    "count_corr": 0.4617710945424979
+   },
+   "held_out": {
+    "passes": 30,
+    "gfw_ships": 729,
+    "our_detections": 439,
+    "gfw_recall": 0.48559670781893005,
+    "agreement": 0.8861047835990888,
+    "f1": 0.6273807652618414,
+    "count_corr": 0.46290202636181715
+   }
+  },
+  "0.15": {
+   "tune": {
+    "passes": 34,
+    "gfw_ships": 779,
+    "our_detections": 443,
+    "gfw_recall": 0.4467265725288832,
+    "agreement": 0.7765237020316027,
+    "f1": 0.5671672904723553,
+    "count_corr": 0.4372846531316209
+   },
+   "held_out": {
+    "passes": 30,
+    "gfw_ships": 729,
+    "our_detections": 359,
+    "gfw_recall": 0.41838134430727025,
+    "agreement": 0.8802228412256268,
+    "f1": 0.5671763878549634,
+    "count_corr": 0.4368218909328826
+   }
+  },
+  "0.2": {
+   "tune": {
+    "passes": 34,
+    "gfw_ships": 779,
+    "our_detections": 359,
+    "gfw_recall": 0.38125802310654683,
+    "agreement": 0.7771587743732591,
+    "f1": 0.5115568396488499,
+    "count_corr": 0.4381734321980357
+   },
+   "held_out": {
+    "passes": 30,
+    "gfw_ships": 729,
+    "our_detections": 298,
+    "gfw_recall": 0.3662551440329218,
+    "agreement": 0.8825503355704698,
+    "f1": 0.5176764605058,
+    "count_corr": 0.41540582304119417
+   }
+  },
+  "0.25": {
+   "tune": {
+    "passes": 34,
+    "gfw_ships": 779,
+    "our_detections": 290,
+    "gfw_recall": 0.3478818998716303,
+    "agreement": 0.7862068965517242,
+    "f1": 0.48233815504953115,
+    "count_corr": 0.42247600989425366
+   },
+   "held_out": {
+    "passes": 30,
+    "gfw_ships": 729,
+    "our_detections": 245,
+    "gfw_recall": 0.32510288065843623,
+    "agreement": 0.8938775510204081,
+    "f1": 0.47679545830347797,
+    "count_corr": 0.39992705935285805
+   }
+  },
+  "0.3": {
+   "tune": {
+    "passes": 34,
+    "gfw_ships": 779,
+    "our_detections": 224,
+    "gfw_recall": 0.27599486521181,
+    "agreement": 0.7767857142857143,
+    "f1": 0.4072811993075893,
+    "count_corr": 0.41813767835629523
+   },
+   "held_out": {
+    "passes": 30,
+    "gfw_ships": 729,
+    "our_detections": 199,
+    "gfw_recall": 0.2825788751714678,
+    "agreement": 0.8994974874371859,
+    "f1": 0.4300551068606584,
+    "count_corr": 0.37800289300968154
+   }
+  },
+  "0.4": {
+   "tune": {
+    "passes": 34,
+    "gfw_ships": 779,
+    "our_detections": 135,
+    "gfw_recall": 0.18870346598202825,
+    "agreement": 0.7925925925925926,
+    "f1": 0.30483148898234463,
+    "count_corr": 0.34143671462233677
+   },
+   "held_out": {
+    "passes": 30,
+    "gfw_ships": 729,
+    "our_detections": 115,
+    "gfw_recall": 0.17421124828532236,
+    "agreement": 0.8608695652173913,
+    "f1": 0.2897805844934084,
+    "count_corr": 0.29404022044364886
+   }
+  }
+ }
+}

@@ -95,6 +95,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--max-train", type=int, default=4000)
     ap.add_argument("--max-val", type=int, default=800)
+    ap.add_argument("--max-test", type=int, default=0,
+                    help="also build a held-out test split (never used in training)")
     ap.add_argument("--labels", choices=["obb", "aabb"], default="obb")
     ap.add_argument("--empty-frac", type=float, default=0.15)
     ap.add_argument("--quality", type=int, default=95, help="JPEG quality")
@@ -110,7 +112,9 @@ def main():
         raise SystemExit(f"{OUT} was built with --labels {prog.get('labels')}; delete it or match it")
     prog["labels"] = args.labels
 
-    for split, target in (("train", args.max_train), ("val", args.max_val)):
+    for split, target in (("train", args.max_train), ("val", args.max_val), ("test", args.max_test)):
+        if target <= 0:
+            continue
         img_dir, lbl_dir = (os.path.join(OUT, d, split) for d in ("images", "labels"))
         os.makedirs(img_dir, exist_ok=True)
         os.makedirs(lbl_dir, exist_ok=True)
@@ -154,7 +158,8 @@ def main():
             print(f"  {shard}: +{got}  -> {st['kept']}/{target} ({st['empty']} empty)")
 
     with open(os.path.join(OUT, "data.yaml"), "w") as f:
-        f.write(f"path: {os.path.abspath(OUT)}\ntrain: images/train\nval: images/val\n"
+        test = "test: images/test\n" if os.path.isdir(os.path.join(OUT, "images", "test")) else ""
+        f.write(f"path: {os.path.abspath(OUT)}\ntrain: images/train\nval: images/val\n{test}"
                 f"names:\n  0: ship\n")
     print(f"\nWrote {OUT}/data.yaml  (labels: {args.labels})")
 

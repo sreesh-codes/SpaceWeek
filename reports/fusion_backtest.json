@@ -1,0 +1,48 @@
+{
+ "fresh_seed": {
+  "rmse": 2.752533469478875,
+  "r2": 0.9900089731073701,
+  "tier_accuracy": {
+   "clean": 1.0,
+   "ghost": 1.0,
+   "jammed_genuine": 0.9841986455981941,
+   "sts_transfer": 1.0,
+   "size_mismatch": 1.0,
+   "dark_no_excuse": 1.0,
+   "all": 0.9976666666666667
+  },
+  "monotonic_violation_rate": {
+   "sar_detected": 0.0,
+   "sar_confidence": 0.0,
+   "length_match_ratio": 0.0,
+   "length_delta_m": 0.0,
+   "radar_ais_discrepancy": 0.0,
+   "sts_risk_score": 0.0,
+   "dark_vessel_nearby": 0.0,
+   "days_from_pass": 0.0
+  }
+ },
+ "fresh_seed_plus_feature_noise_0.1": {
+  "rmse": 4.669350170083263,
+  "r2": 0.9712486792514714,
+  "tier_accuracy": {
+   "clean": 0.9673390970220941,
+   "ghost": 1.0,
+   "jammed_genuine": 0.9593679458239278,
+   "sts_transfer": 1.0,
+   "size_mismatch": 0.9706959706959707,
+   "dark_no_excuse": 1.0,
+   "all": 0.98
+  },
+  "monotonic_violation_rate": {
+   "sar_detected": 0.0,
+   "sar_confidence": 0.0,
+   "length_match_ratio": 0.0,
+   "length_delta_m": 0.0,
+   "radar_ais_discrepancy": 0.0,
+   "sts_risk_score": 0.0,
+   "dark_vessel_nearby": 0.0,
+   "days_from_pass": 0.0
+  }
+ }
+}
